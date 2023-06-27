@@ -593,6 +593,9 @@ MaterialData* UsdMod::Impl::processMaterial(Args& args, const pxr::UsdPrim& matP
       albedoTexture = TextureRef(getTexture(args, shader, kAlbedoTextureToken, true));
     }
 
+    // We need to use a custom sampler for this texture
+    albedoTexture.sampler = args.context->getDevice()->getCommon()->getResources().getSampler(VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+
     const RayPortalMaterialData rayPortalMaterialData{
       albedoTexture, albedoTexture,
       static_cast<uint8_t>(rayPortalIndex), static_cast<uint8_t>(spriteSheetRows),
@@ -1196,7 +1199,7 @@ void UsdMod::Impl::processUSD(const Rc<DxvkContext>& context) {
   pxr::UsdStageRefPtr stage = pxr::UsdStage::Open(replacementsUsdPath, pxr::UsdStage::LoadAll);
 
   if (!stage) {
-    Logger::info(str::format("No USD mod files were found, no meshes / materials will be replaced."));
+    Logger::err(str::format("USD mod file failed parsing: ", std::filesystem::weakly_canonical(replacementsUsdPath).string()));
     m_openedFilePath.clear();
     m_fileModificationTime = fs::file_time_type();
     m_owner.setState(State::Unloaded);
