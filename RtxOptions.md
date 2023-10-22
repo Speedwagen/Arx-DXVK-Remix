@@ -71,6 +71,8 @@ Tables below enumerate all the options and their defaults set by RTX Remix. Note
 |rtx.autoExposure.exposureWeightCurve4|float|1|Curve control point 4\.|
 |rtx.autoExposure.useExposureCompensation|bool|False|Uses a curve to determine the importance of different exposure levels when calculating average exposure\.|
 |rtx.automation.disableBlockingDialogBoxes|bool|False|Disables various blocking blocking dialog boxes \(such as popup windows\) requiring user interaction when set to true, otherwise uses default behavior when set to false\.<br>This option is typically meant for automation\-driven execution of Remix where such dialog boxes if present may cause the application to hang due to blocking waiting for user input\.|
+|rtx.automation.disableDisplayMemoryStatistics|bool|False|Disables display of memory statistics in the Remix window\.<br>This option is typically meant for automation of tests for which we don't want non\-deterministic runtime memory statistics to be shown in GUI that is included as part of test image output\.|
+|rtx.automation.disableUpdateUpscaleFromDlssPreset|bool|False|Disables updating upscaler from DLSS preset\.<br>This option is typically meant for automation of tests for which we don't want upscaler to be updated based on a DLSS preset\.|
 |rtx.blockInputToGameInUI|bool|True||
 |rtx.bloom.enable|bool|True||
 |rtx.bloom.intensity|float|0.06||
@@ -82,7 +84,6 @@ Tables below enumerate all the options and their defaults set by RTX Remix. Note
 |rtx.camera.freeCameraViewRelative|bool|True|Free camera transform is relative to the view\.|
 |rtx.camera.freeCameraYaw|float|0|Free camera's position\.|
 |rtx.camera.lockFreeCamera|bool|False|Locks free camera\.|
-|rtx.camera.trackCamerasSeenStats|bool|False|Enables tracking and reporting of statistics for Cameras seen within a frame\.|
 |rtx.cameraAnimationAmplitude|float|2|Amplitude of the free camera's animation\.|
 |rtx.cameraAnimationMode|int|3|Free camera's animation mode\.|
 |rtx.cameraShakePeriod|int|20|Period of the free camera's animation\.|
@@ -484,9 +485,11 @@ Tables below enumerate all the options and their defaults set by RTX Remix. Note
 |rtx.showUICursor|bool|True||
 |rtx.skipDrawCallsPostRTXInjection|bool|False|Ignores all draw calls recorded after RTX Injection, the location of which varies but is currently based on when tagged UI textures begin to draw\.|
 |rtx.skipObjectsWithUnknownCamera|bool|False||
+|rtx.skyAutoDetect|int|0|Automatically tag sky draw calls using various heuristics\.<br>0 = None<br>1 = CameraPosition \- assume the first seen camera position is a sky camera\.<br>2 = CameraPositionAndDepthFlags \- assume the first seen camera position is a sky camera, if its draw call's depth test is disabled\. If it's enabled, assume no sky camera\.<br>Note: if all draw calls are marked as sky, then assume that there's no sky camera at all\.|
 |rtx.skyBrightness|float|1||
 |rtx.skyDrawcallIdThreshold|int|0|It's common in games to render the skybox first, and so, this value provides a simple mechanism to identify those early draw calls that are untextured \(textured draw calls can still use the Sky Textures functionality\.|
 |rtx.skyForceHDR|bool|False|By default sky will be rasterized in the color format used by the game\. Set the checkbox to force sky to be rasterized in HDR intermediate format\. This may be important when sky textures replaced with HDR textures\.|
+|rtx.skyMinZThreshold|float|1|If a draw call's viewport has min depth greater than or equal to this threshold, then assume that it's a sky\.|
 |rtx.skyProbeSide|int|1024||
 |rtx.skyUiDrawcallCount|int|0||
 |rtx.stochasticAlphaBlendDepthDifference|float|0.1|Max depth difference for a valid neighbor\.|
@@ -504,9 +507,9 @@ Tables below enumerate all the options and their defaults set by RTX Remix. Note
 |rtx.stochasticAlphaBlendUseNeighborSearch|bool|True|Get radiance from neighbor opaque pixels\.|
 |rtx.stochasticAlphaBlendUseRadianceVolume|bool|True|Get radiance from radiance volume\.|
 |rtx.taauPreset|int|1|Adjusts TAA\-U scaling factor, trades quality for performance\.|
-|rtx.temporalAA.colorClampingFactor|float|1||
-|rtx.temporalAA.maximumRadiance|float|10000||
-|rtx.temporalAA.newFrameWeight|float|1||
+|rtx.temporalAA.colorClampingFactor|float|1|A scalar factor to apply to the standard deviation of the neighborhood of pixels in the color signal used for clamping\. Should be in the range 0\-infinity\.<br>This value essentially represents how many standard deviations of tolerance from the current frame's colors around each pixel pixel the temporally accumulated color signal may have\.<br>Higher values will cause more ghosting whereas lower values may reduce ghosting but will impact image quality \(less ability to upscale effectively\) and reduce stability \(more jittering\)\.|
+|rtx.temporalAA.maximumRadiance|float|10000|The maximum value to use in TAA\-U's perceptual quantizer color transformation, measured in cd/m^2\.<br>The typical value used for the PQ transformation is 10,000 and usually shouldn't be changed\.|
+|rtx.temporalAA.newFrameWeight|float|0.1|The maximum amount of the current frame to use as part of the temporal anti\-aliasing process\. Must be in the range 0\-1\.<br>Values closer to 0 will result in better image stability \(less jittering\) and less aliasing, values closer to 1 will result in more responsive results \(less ghosting\)\.|
 |rtx.terrainBaker.cascadeMap.defaultHalfWidth|float|1000|Cascade map square's default half width around the camera \[meters\]\. Used when the terrain's BBOX couldn't be estimated\.|
 |rtx.terrainBaker.cascadeMap.defaultHeight|float|1000|Cascade map baker's camera default height above the in\-game camera \[meters\]\. Used when the terrain's BBOX couldn't be estimated\.|
 |rtx.terrainBaker.cascadeMap.expandLastCascade|bool|True|Expands the last cascade's footprint to cover the whole cascade map\. This ensures all terrain surface has valid baked texture data to sample from across the cascade map's range even if there isn't enough cascades generated \(due to the current settings or limitations\)\.|
@@ -578,6 +581,7 @@ Tables below enumerate all the options and their defaults set by RTX Remix. Note
 |rtx.viewDistance.noiseScale|float|3|The scale per meter value applied to ther world space position fed into the noise generation function for generating the fade in Coherent Noise view distance mode\.|
 |rtx.viewModel.enable|bool|False|If true, try to resolve view models \(e\.g\. first\-person weapons\)\. World geometry doesn't have shadows / reflections / etc from the view models\.|
 |rtx.viewModel.enableVirtualInstances|bool|True|If true, virtual instances are created to render the view models behind a portal\.|
+|rtx.viewModel.maxZThreshold|float|0|If a draw call's viewport has max depth less than or equal to this threshold, then assume that it's a view model\.|
 |rtx.viewModel.perspectiveCorrection|bool|True|If true, apply correction to view models \(e\.g\. different FOV is used for view models\)\.|
 |rtx.viewModel.rangeMeters|float|1|\[meters\] Max distance at which to find a portal for view model virtual instances\. If rtx\.viewModel\.separateRays is true, this is also max length of view model rays\.|
 |rtx.viewModel.scale|float|1|Scale for view models\. Minimize to prevent clipping\.|

@@ -128,6 +128,12 @@ namespace dxvk {
     View,
     World
   };
+  
+  enum class SkyAutoDetectMode : int {
+    None = 0,
+    CameraPosition,
+    CameraPositionAndDepthFlags
+  };
 
   class RtxOptions {
     friend class ImGUI; // <-- we want to modify these values directly.
@@ -205,22 +211,23 @@ namespace dxvk {
                   "Defines which hashes we need to include when sampling from replacements and doing USD capture.");
     
   public:
-#ifdef REMIX_DEVELOPMENT
+//#ifdef REMIX_DEVELOPMENT
     // Note, this is currently a debug option we don't want to support in shipping config
     RTX_OPTION_ENV("rtx", bool, enableRaytracing, true, "DXVK_ENABLE_RAYTRACING",
                    "Globally enables or disables ray tracing. When set to false the original game should render mostly as it would in DXVK typically.\n"
                    "Some artifacts may still appear however compared to the original game either due to issues with the underlying DXVK translation or issues in Remix itself.");
-#else
+//#else
     // Shipping config
-    bool enableRaytracing() { return true; }
-#endif
+  //  bool enableRaytracing() { return true; }
+//#endif
 
     RTX_OPTION_ENV("rtx", float, timeDeltaBetweenFrames, 0.f, "RTX_FRAME_TIME_DELTA_MS", "Frame time delta to use during scene processing. Setting this to 0 will use actual frame time delta for a given frame. Non-zero value is primarily used for automation to ensure determinism run to run.");
 
     RTX_OPTION_FLAG("rtx", bool, keepTexturesForTagging, false, RtxOptionFlags::NoSave, "A flag to keep all textures in video memory, which can drastically increase VRAM consumption. Intended to assist with tagging textures that are only used for a short period of time (such as loading screens). Use only when necessary!");
+    RTX_OPTION("rtx.gui", bool, showLegacyTextureGui, false, "A setting to toggle the old texture selection GUI, where each texture category is represented as its own list.");
 
     RTX_OPTION("rtx", bool, skipDrawCallsPostRTXInjection, false, "Ignores all draw calls recorded after RTX Injection, the location of which varies but is currently based on when tagged UI textures begin to draw.");
-    RTX_OPTION("rtx", DlssPreset, dlssPreset, DlssPreset::On, "Combined DLSS Preset for quickly controlling Upscaling, Frame Interpolation and Latency Reduction.");
+    RTX_OPTION_ENV("rtx", DlssPreset, dlssPreset, DlssPreset::On, "RTX_DLSS_PRESET", "Combined DLSS Preset for quickly controlling Upscaling, Frame Interpolation and Latency Reduction.");
     RTX_OPTION("rtx", NisPreset, nisPreset, NisPreset::Balanced, "Adjusts NIS scaling factor, trades quality for performance.");
     RTX_OPTION("rtx", TaauPreset, taauPreset, TaauPreset::Balanced,  "Adjusts TAA-U scaling factor, trades quality for performance.");
     RTX_OPTION_ENV("rtx", GraphicsPreset, graphicsPreset, GraphicsPreset::Auto, "DXVK_GRAPHICS_PRESET_TYPE", "Overall rendering preset, higher presets result in higher image quality, lower presets result in better performance.");
@@ -249,6 +256,7 @@ namespace dxvk {
       RTX_OPTION("rtx.viewModel", float, scale, 1.0f, "Scale for view models. Minimize to prevent clipping.");
       RTX_OPTION("rtx.viewModel", bool, enableVirtualInstances, true, "If true, virtual instances are created to render the view models behind a portal.");
       RTX_OPTION("rtx.viewModel", bool, perspectiveCorrection, true, "If true, apply correction to view models (e.g. different FOV is used for view models).");
+      RTX_OPTION("rtx.viewModel", float, maxZThreshold, 0.0f, "If a draw call's viewport has max depth less than or equal to this threshold, then assume that it's a view model.");
     } viewModel;
 
   public:
@@ -303,17 +311,19 @@ namespace dxvk {
     RTX_OPTION("rtx", bool, zUp, false, "Indicates that the Z axis is the \"upward\" axis in the world when true, otherwise the Y axis when false.");
     RTX_OPTION("rtx", bool, isLHS, false, "");
     RTX_OPTION("rtx", float, uniqueObjectDistance, 300.f, "[cm]");
-    RTX_OPTION_FLAG("rtx", UIType, showUI, UIType::None, RtxOptionFlags::NoSave | RtxOptionFlags::NoReset, "0 = Don't Show, 1 = Show Simple, 2 = Show Advanced.");
+    RTX_OPTION_FLAG_ENV("rtx", UIType, showUI, UIType::None, RtxOptionFlags::NoSave | RtxOptionFlags::NoReset, "RTX_GUI_DISPLAY_UI", "0 = Don't Show, 1 = Show Simple, 2 = Show Advanced.");
     RTX_OPTION_FLAG("rtx", bool, defaultToAdvancedUI, false, RtxOptionFlags::NoReset, "");
     RTX_OPTION("rtx", bool, showUICursor, true, "");
     RTX_OPTION_FLAG("rtx", bool, blockInputToGameInUI, true, RtxOptionFlags::NoSave, "");
-    RTX_OPTION("rtx", bool, hideSplashMessage, false,
+    RTX_OPTION_ENV("rtx", bool, hideSplashMessage, false, "RTX_HIDE_SPLASH_MESSAGE",
                "A flag to disable the splash message indicating how to use Remix from appearing when the application starts.\n"
                "When set to true this message will be hidden, otherwise it will be displayed on every launch.");
   private:
     VirtualKeys m_remixMenuKeyBinds;
+    VirtualKeys m_toggleEnhancementsKeyBinds;
   public:
     const VirtualKeys& remixMenuKeyBinds() const { return m_remixMenuKeyBinds; }
+    const VirtualKeys& toggleEnhancementsKeyBinds() const { return m_toggleEnhancementsKeyBinds; }
 
     RTX_OPTION("rtx", DLSSProfile, qualityDLSS, DLSSProfile::Auto, "Adjusts internal DLSS scaling factor, trades quality for performance.");
     // Note: All ray tracing modes depend on the rtx.raytraceModePreset option as they may be overridden by automatic defaults for a specific vendor if the preset is set to Auto. Set
@@ -684,7 +694,14 @@ namespace dxvk {
                "A time in milliseconds that the DXVK presentation thread should sleep for. Requires present throttling to be enabled to take effect.\n"
                "Note that the application may sleep for longer than the specified time as is expected with sleep functions in general.");
     RTX_OPTION_ENV("rtx", bool, validateCPUIndexData, false, "DXVK_VALIDATE_CPU_INDEX_DATA", "");
-
+    #ifdef _DEBUG
+    RTX_OPTION("rtx.debug",bool,enableValidationLayers,true,"An extremely performance-intensive debug mode meant for extremely precise debugging only.  In most cases, this should be disabled.");
+    #else
+    RTX_OPTION("rtx.debug", bool, enableValidationLayers,false, "An extremely performance-intensive debug mode meant for extremely precise debugging only.  In most cases, this should be disabled.\n"
+               "Do NOT enable this unless you are absolutely certain that it is necessary!");
+    #endif
+    RTX_OPTION("rtx.debug", bool, enableGPUBasedValidationLayers, false, "");
+    
     struct OpacityMicromap
     {
       friend class RtxOptions;
@@ -780,6 +797,13 @@ namespace dxvk {
     RTX_OPTION("rtx", uint32_t, skyProbeSide, 1024, "");
     RTX_OPTION_FLAG("rtx", uint32_t, skyUiDrawcallCount, 0, RtxOptionFlags::NoSave, "");
     RTX_OPTION("rtx", uint32_t, skyDrawcallIdThreshold, 0, "It's common in games to render the skybox first, and so, this value provides a simple mechanism to identify those early draw calls that are untextured (textured draw calls can still use the Sky Textures functionality.");
+    RTX_OPTION("rtx", float, skyMinZThreshold, 1.f, "If a draw call's viewport has min depth greater than or equal to this threshold, then assume that it's a sky.");
+    RTX_OPTION("rtx", SkyAutoDetectMode, skyAutoDetect, SkyAutoDetectMode::None, 
+               "Automatically tag sky draw calls using various heuristics.\n"
+               "0 = None\n"
+               "1 = CameraPosition - assume the first seen camera position is a sky camera.\n"
+               "2 = CameraPositionAndDepthFlags - assume the first seen camera position is a sky camera, if its draw call's depth test is disabled. If it's enabled, assume no sky camera.\n"
+               "Note: if all draw calls are marked as sky, then assume that there's no sky camera at all.");
 
     // TODO (REMIX-656): Remove this once we can transition content to new hash
     RTX_OPTION("rtx", bool, logLegacyHashReplacementMatches, false, "");
@@ -792,9 +816,17 @@ namespace dxvk {
     RTX_OPTION("rtx", bool, alwaysCopyDecalGeometries, true, "When set to True tells the geometry processor to always copy decals geometry. This is an optimization flag to experiment with when rtx.useBuffersDirectly is True.");
 
     // Automation Options
-    RTX_OPTION_ENV("rtx.automation", bool, disableBlockingDialogBoxes, false, "DXVK_AUTOMATION_DISABLE_BLOCKING_DIALOG_BOXES",
-                   "Disables various blocking blocking dialog boxes (such as popup windows) requiring user interaction when set to true, otherwise uses default behavior when set to false.\n"
-                   "This option is typically meant for automation-driven execution of Remix where such dialog boxes if present may cause the application to hang due to blocking waiting for user input.");
+    struct Automation {
+      RTX_OPTION_FLAG_ENV("rtx.automation", bool, disableBlockingDialogBoxes, false, RtxOptionFlags::NoSave, "RTX_AUTOMATION_DISABLE_BLOCKING_DIALOG_BOXES",
+                          "Disables various blocking blocking dialog boxes (such as popup windows) requiring user interaction when set to true, otherwise uses default behavior when set to false.\n"
+                          "This option is typically meant for automation-driven execution of Remix where such dialog boxes if present may cause the application to hang due to blocking waiting for user input.");
+      RTX_OPTION_FLAG_ENV("rtx.automation", bool, disableDisplayMemoryStatistics, false, RtxOptionFlags::NoSave, "RTX_AUTOMATION_DISABLE_DISPLAY_MEMORY_STATISTICS",
+                          "Disables display of memory statistics in the Remix window.\n"
+                          "This option is typically meant for automation of tests for which we don't want non-deterministic runtime memory statistics to be shown in GUI that is included as part of test image output.");
+      RTX_OPTION_FLAG_ENV("rtx.automation", bool, disableUpdateUpscaleFromDlssPreset, false, RtxOptionFlags::NoSave, "RTX_AUTOMATION_DISABLE_UPDATE_UPSCALER_FROM_DLSS_PRESET",
+                          "Disables updating upscaler from DLSS preset.\n"
+                          "This option is typically meant for automation of tests for which we don't want upscaler to be updated based on a DLSS preset.");
+    };
 
   public:
     LegacyMaterialDefaults legacyMaterial;
@@ -1005,6 +1037,9 @@ namespace dxvk {
       const VirtualKeys& kDefaultRemixMenuKeyBinds { VirtualKey{VK_MENU},VirtualKey{'X'} };
       m_remixMenuKeyBinds = options.getOption<VirtualKeys>("rtx.remixMenuKeyBinds", kDefaultRemixMenuKeyBinds);
 
+      const VirtualKeys& kDefaultToggleEnhancementsKeyBinds { VirtualKey{VK_MENU},VirtualKey{'R'} };
+      m_toggleEnhancementsKeyBinds = options.getOption<VirtualKeys>("rtx.toggleEnhancementsKeyBinds", kDefaultToggleEnhancementsKeyBinds);
+
       GeometryHashGenerationRule = createRule("Geometry generation", geometryGenerationHashRuleString());
       GeometryAssetHashRule = createRule("Geometry asset", geometryAssetHashRuleString());
     }
@@ -1192,13 +1227,6 @@ namespace dxvk {
     RenderPassIntegrateDirectRaytraceMode getRenderPassIntegrateDirectRaytraceMode() const { return renderPassIntegrateDirectRaytraceMode(); }
     RenderPassIntegrateIndirectRaytraceMode getRenderPassIntegrateIndirectRaytraceMode() const { return renderPassIntegrateIndirectRaytraceMode(); }
 
-    // View Model
-    bool isViewModelEnabled() const { return viewModel.enable(); }
-    float getViewModelRangeMeters() const { return viewModel.rangeMeters(); }
-    float getViewModelScale() const { return viewModel.scale(); }
-    bool isViewModelVirtualInstancesEnabled() const { return viewModel.enableVirtualInstances(); }
-    bool isViewModelPerspectiveCorrectionEnabled() const { return viewModel.perspectiveCorrection(); }
-
     // Resolve Options
     uint8_t getPrimaryRayMaxInteractions() const { return primaryRayMaxInteractions(); }
     uint8_t getPSRRayMaxInteractions() const { return psrRayMaxInteractions(); }
@@ -1328,6 +1356,10 @@ namespace dxvk {
     bool getEnableReplacementLights() { return enableReplacementAssets() && enableReplacementLights(); }
     bool getEnableReplacementMeshes() { return enableReplacementAssets() && enableReplacementMeshes(); }
     bool getEnableReplacementMaterials() { return enableReplacementAssets() && enableReplacementMaterials(); }
+
+    bool getEnableValidationLayers() { return enableValidationLayers(); }
+    bool getEnableGPUBasedValidationLayers() { return enableGPUBasedValidationLayers();
+    }
 
     // Capture Options
     //   General

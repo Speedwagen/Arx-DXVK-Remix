@@ -70,6 +70,12 @@ namespace dxvk {
 
       // NV_low_latency extension not supported by VL
       ".*? MessageID = 0x8fe45d78 .*?",
+
+      // Likely a VL bug, started to occur after VK SDK update
+      ".*? Timeout waiting for timeline semaphore state to update. This is most likely a validation bug. .*?$",
+
+      // cmdResetQuery has reset commented out since it hits an AV on initial reset - need to update dxvk that handles resets differently
+      ".*? After query pool creation, each query must be reset before it is used. Queries must also be reset between uses.$",
     };
 
     for(auto& exp : ignoredErrors) {
@@ -197,13 +203,11 @@ namespace dxvk {
     "VK_LAYER_KHRONOS_validation"
   };
 
-  const bool enableGpuBasedValidationLayers = false;
+  bool enableGpuBasedValidationLayers = &RtxOptions::getEnableGPUBasedValidationLayers;
 
-#ifndef _DEBUG
-  const bool enableValidationLayers = false;
-#else
-  const bool enableValidationLayers = true;
-#endif
+
+  bool enableValidationLayers = &RtxOptions::getEnableValidationLayers;
+
   // NV-DXVK end
 
   DxvkInstance::DxvkInstance() {

@@ -250,10 +250,11 @@ namespace dxvk {
     // into the free bits in memory payload structures on the GPU.
     assert((renderSize[0] < (1 << 14)) && (renderSize[1] < (1 << 14)));
 
-    // Update memory systems budgets for texture manager
     getCommonObjects()->getTextureManager().clear();
-    m_device->waitForIdle();
-    getCommonObjects()->getTextureManager().updateMemoryBudgets(this);
+
+    // DXVK doesnt free chunks for us by default (its high water mark) so force release some memory back to the system here.
+    DxvkMemoryAllocator& memoryManager = m_device->getCommon()->memoryManager();
+    memoryManager.freeUnusedChunks();
   }
 
   // Hooked into D3D9 presentImage (same place HUD rendering is)
@@ -310,9 +311,8 @@ namespace dxvk {
       }
 
       const bool captureTestScreenshot = (m_screenshotFrameEnabled && m_device->getCurrentFrameId() == m_screenshotFrameNum);
-      const bool captureScreenImage = s_triggerScreenshot || captureTestScreenshot;
+      const bool captureScreenImage = s_triggerScreenshot || (captureTestScreenshot && !s_capturePrePresentTestScreenshot);
       const bool captureDebugImage = RtxOptions::Get()->shouldCaptureDebugImage();
-      s_lastCameraPosition = getSceneManager().getCamera().getPosition();
       
       if(s_triggerUsdCapture) {
         s_triggerUsdCapture = false;
@@ -325,7 +325,9 @@ namespace dxvk {
         Logger::info(str::format("RTX: Use rtxdi ", RtxOptions::Get()->useRTXDI()));
         Logger::info(str::format("RTX: Use dlss ", RtxOptions::Get()->isDLSSEnabled()));
         Logger::info(str::format("RTX: Use nis ", RtxOptions::Get()->isNISEnabled()));
-        m_screenshotFrameEnabled = false;
+        if (!s_capturePrePresentTestScreenshot) {
+          m_screenshotFrameEnabled = false;
+        }
       }
 
       if (captureScreenImage && captureDebugImage) {
@@ -471,6 +473,9 @@ namespace dxvk {
 
         // Upscaling if DLSS/NIS enabled, or the Composition Pass will do upscaling
         if (shouldUseDLSS()) {
+          // xxxnsubtil: the DLSS indicator reads our exposure texture even with DLSS autoexposure on
+          // make sure it has been created, otherwise we run into trouble on the first frame
+          m_common->metaAutoExposure().createResources(this);
           dispatchDLSS(rtOutput);
         } else if (shouldUseNIS()) {
           dispatchNIS(rtOutput);
@@ -532,6 +537,8 @@ namespace dxvk {
     } else {
       getSceneManager().clear(this, m_previousInjectRtxHadScene);
       m_previousInjectRtxHadScene = false;
+
+      getSceneManager().onFrameEndNoRTX();
     }
 
     // Reset the fog state to get it re-discovered on the next frame
@@ -543,18 +550,20 @@ namespace dxvk {
     m_resetHistory = false;
   }
 
-  // Called right before D3D9 present
   void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targetImage) {
     // Fallback inject (is a no-op if already injected this frame, or no valid RT scene)
     injectRTX(cachedReflexFrameId, targetImage);
+  }
 
-    // If injectRTX couldn't screenshot a final image,
+  // Called right before D3D9 present
+  void RtxContext::onPresent(Rc<DxvkImage> targetImage) {
+    // If injectRTX couldn't screenshot a final image or a pre-present screenshot is requested,
     // take a screenshot of a present image (with UI and others)
     {
       const bool isRaytracingEnabled = RtxOptions::Get()->enableRaytracing();
       const bool isCameraValid = getSceneManager().getCamera().isValid(m_device->getCurrentFrameId());
 
-      if (!isRaytracingEnabled || !isCameraValid) {
+      if (!isRaytracingEnabled || !isCameraValid || s_capturePrePresentTestScreenshot) {
         const bool captureTestScreenshot = (m_screenshotFrameEnabled && m_device->getCurrentFrameId() == m_screenshotFrameNum);
         const bool captureDxvkScreenImage = s_triggerScreenshot || captureTestScreenshot;
         if (captureDxvkScreenImage) {
@@ -632,11 +641,32 @@ namespace dxvk {
       }
     }
 
+    const auto& cameraManager = getSceneManager().getCameraManager();
+
+    // TODO: a last camera is used to finalize skinning...
+    // processCameraData can be called only after finalizePendingFutures,
+    // as we need geometry hash to check sky geometries
+    const RtCamera* lastCamera =
+      cameraManager.isCameraValid(cameraManager.getLastSetCameraType())
+        ? &cameraManager.getCamera(cameraManager.getLastSetCameraType())
+        : nullptr;
+
     // Sync any pending work with geometry processing threads
-    const RtCamera& camera = m_common->getSceneManager().getCameraManager().getLastSetCamera();
-    if (drawCallState.finalizePendingFutures(camera.isValid(m_device->getCurrentFrameId()) ? &camera : nullptr)) {
+    if (drawCallState.finalizePendingFutures(lastCamera)) {
+      drawCallState.cameraType = getSceneManager().processCameraData(drawCallState);
+
+      if (drawCallState.cameraType == CameraType::Unknown) {
+        if (RtxOptions::skipObjectsWithUnknownCamera()) {
+          return;
+        }
+        // fallback
+        drawCallState.cameraType = CameraType::Enum::Main;
+      }
+
       // Handle the sky
-      drawCallState.isSky = rasterizeSky(params, drawCallState);
+      if (drawCallState.cameraType == CameraType::Sky) {
+        rasterizeSky(params, drawCallState);
+      }
 
       // Bake the terrain
       bakeTerrain(params, drawCallState);
@@ -743,7 +773,7 @@ namespace dxvk {
     constants.enableSecondaryBounces = RtxOptions::Get()->isSecondaryBouncesEnabled();
     constants.enableSeparatedDenoisers = RtxOptions::Get()->isSeparatedDenoiserEnabled();
     constants.enableCalculateVirtualShadingNormals = RtxOptions::Get()->isUseVirtualShadingNormalsForDenoisingEnabled();
-    constants.enableViewModelVirtualInstances = RtxOptions::Get()->isViewModelVirtualInstancesEnabled();
+    constants.enableViewModelVirtualInstances = RtxOptions::Get()->viewModel.enableVirtualInstances();
     constants.enablePSRR = RtxOptions::Get()->isPSRREnabled();
     constants.enablePSTR = RtxOptions::Get()->isPSTREnabled();
     constants.enablePSTROutgoingSplitApproximation = RtxOptions::Get()->isPSTROutgoingSplitApproximationEnabled();
@@ -867,7 +897,7 @@ namespace dxvk {
 
     constants.uniformRandomNumber = jenkinsHash(constants.frameIdx);
     constants.vertexColorStrength = RtxOptions::Get()->vertexColorStrength();
-    constants.viewModelRayTMax = RtxOptions::Get()->getViewModelRangeMeters() * RtxOptions::Get()->getMeterToWorldUnitScale();
+    constants.viewModelRayTMax = RtxOptions::ViewModel::rangeMeters() * RtxOptions::Get()->getMeterToWorldUnitScale();
     constants.roughnessDemodulationOffset = m_common->metaDemodulate().demodulateRoughnessOffset();
 
     constants.volumeArgs = getSceneManager().getVolumeManager().getVolumeArgs(cameraManager, 
@@ -964,6 +994,10 @@ namespace dxvk {
   }
 
   bool RtxContext::shouldBakeSky(const DrawCallState& drawCallState) {
+    if (drawCallState.minZ >= RtxOptions::skyMinZThreshold()) {
+      return true;
+    }
+
     const XXH64_hash_t colorTextureHash = drawCallState.getMaterialData().colorTextures[0].getImageHash();
 
     // NOTE: we use color texture hash for sky detection, however the replacement is hashed with
@@ -1435,7 +1469,7 @@ namespace dxvk {
     return *static_cast<D3D9FixedFunctionVS*>(slice.mapPtr);
   }
 
-  void RtxContext::rasterizeToSkyMatte(const DrawParameters& params) {
+  void RtxContext::rasterizeToSkyMatte(const DrawParameters& params, float minZ, float maxZ) {
     ScopedGpuProfileZone(this, "rasterizeToSkyMatte");
 
     auto skyMatteView = getResourceManager().getSkyMatte(this, m_skyColorFormat).view;
@@ -1444,7 +1478,7 @@ namespace dxvk {
     VkViewport viewport { 0.5f, static_cast<float>(skyMatteExt.height) + 0.5f,
       static_cast<float>(skyMatteExt.width),
       -static_cast<float>(skyMatteExt.height),
-      0.f, 1.f
+      minZ, maxZ
     };
 
     VkRect2D scissor {
@@ -1677,17 +1711,9 @@ namespace dxvk {
         }
       }
     }
-
-    return;
   }
 
-  bool RtxContext::rasterizeSky(const DrawParameters& params, const DrawCallState& drawCallState) {
-    auto& options = RtxOptions::Get();
-
-    const XXH64_hash_t geometryHash = drawCallState.getHash(RtxOptions::Get()->GeometryAssetHashRule);
-    if (!shouldBakeSky(drawCallState) && !RtxOptions::Get()->isSkyboxGeometry(geometryHash))
-      return false;
-
+  void RtxContext::rasterizeSky(const DrawParameters& params, const DrawCallState& drawCallState) {
     ScopedGpuProfileZone(this, "rasterizeSky");
 
     // Grab and apply replacement texture if any
@@ -1739,7 +1765,7 @@ namespace dxvk {
     const uint32_t curViewportCount = m_state.gp.state.rs.viewportCount();
     const DxvkViewportState curVp = m_state.vp;
 
-    rasterizeToSkyMatte(params);
+    rasterizeToSkyMatte(params, drawCallState.minZ, drawCallState.maxZ);
     // TODO: make probe optional?
     rasterizeToSkyProbe(params);
 
@@ -1755,8 +1781,6 @@ namespace dxvk {
     if (curColorView != nullptr) {
       bindResourceView(drawCallState.materialData.colorTextureSlot[0], curColorView, nullptr);
     }
-
-    return true;
   }
 
   void RtxContext::clearRenderTarget(const Rc<DxvkImageView>& imageView,
@@ -1812,6 +1836,37 @@ namespace dxvk {
     default:
       Logger::err("Invalid SIMD state");
       break;
+    }
+  }
+
+  const DxvkScInfo& RtxContext::getSpecConstantsInfo(VkPipelineBindPoint pipeline) const {
+    return
+      pipeline == VK_PIPELINE_BIND_POINT_GRAPHICS
+      ? m_state.gp.state.sc
+      : pipeline == VK_PIPELINE_BIND_POINT_COMPUTE
+      ? m_state.cp.state.sc
+      : m_state.rp.state.sc;
+  }
+
+  void RtxContext::setSpecConstantsInfo(
+    VkPipelineBindPoint pipeline,
+    const DxvkScInfo& newSpecConstantInfo) {
+    DxvkScInfo& specConstantInfo =
+      pipeline == VK_PIPELINE_BIND_POINT_GRAPHICS
+      ? m_state.gp.state.sc
+      : pipeline == VK_PIPELINE_BIND_POINT_COMPUTE
+      ? m_state.cp.state.sc
+      : m_state.rp.state.sc;
+
+    if (specConstantInfo != newSpecConstantInfo) {
+      specConstantInfo = newSpecConstantInfo;
+
+      m_flags.set(
+        pipeline == VK_PIPELINE_BIND_POINT_GRAPHICS
+        ? DxvkContextFlag::GpDirtyPipelineState
+        : pipeline == VK_PIPELINE_BIND_POINT_COMPUTE
+          ? DxvkContextFlag::CpDirtyPipelineState
+          : DxvkContextFlag::RpDirtyPipelineState);
     }
   }
 
